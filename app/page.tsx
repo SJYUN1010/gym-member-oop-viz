@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect, useLayoutEffect } from "react";
 import { GymMember } from "@/lib/gymMember";
 import { PTMember } from "@/lib/ptMember";
 import { createMembers } from "@/lib/instances";
@@ -38,6 +38,14 @@ const METHOD_INFO: { [key: string]: MethodInfo } = {
   },
 };
 
+type Point = { x: number; y: number };
+type Line = {
+  from: Point;
+  to: Point;
+  kind: "inherit" | "instance";
+  active: boolean;
+};
+
 export default function Home() {
   const [members, setMembers] = useState<GymMember[]>(() => createMembers());
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -46,6 +54,125 @@ export default function Home() {
   const [highlightedClass, setHighlightedClass] = useState<string | null>(null);
   const [hoveredCardIdx, setHoveredCardIdx] = useState<number | null>(null);
   const [hoveredLogId, setHoveredLogId] = useState<number | null>(null);
+
+  // 박스/카드 ref들
+  const diagramRef = useRef<HTMLDivElement>(null);
+  const adtRef = useRef<HTMLDivElement>(null);
+  const gymMemberRef = useRef<HTMLDivElement>(null);
+  const standardRef = useRef<HTMLDivElement>(null);
+  const ptRef = useRef<HTMLDivElement>(null);
+  const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  const [lines, setLines] = useState<Line[]>([]);
+  const [svgSize, setSvgSize] = useState({ width: 0, height: 0 });
+
+  // 선 계산
+  const recomputeLines = () => {
+    const container = diagramRef.current;
+    if (!container) return;
+    const cRect = container.getBoundingClientRect();
+
+    const getRect = (el: HTMLElement | null) => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return {
+        topCenter: { x: r.left + r.width / 2 - cRect.left, y: r.top - cRect.top },
+        bottomCenter: {
+          x: r.left + r.width / 2 - cRect.left,
+          y: r.bottom - cRect.top,
+        },
+        leftCenter: { x: r.left - cRect.left, y: r.top + r.height / 2 - cRect.top },
+        rightCenter: {
+          x: r.right - cRect.left,
+          y: r.top + r.height / 2 - cRect.top,
+        },
+        center: {
+          x: r.left + r.width / 2 - cRect.left,
+          y: r.top + r.height / 2 - cRect.top,
+        },
+      };
+    };
+
+    const adt = getRect(adtRef.current);
+    const gym = getRect(gymMemberRef.current);
+    const std = getRect(standardRef.current);
+    const pt = getRect(ptRef.current);
+
+    if (!adt || !gym || !std || !pt) return;
+
+    const newLines: Line[] = [];
+
+    // 상속 화살표
+    newLines.push({
+      from: gym.topCenter,
+      to: adt.bottomCenter,
+      kind: "inherit",
+      active: highlightedClass === "GymMember",
+    });
+    newLines.push({
+      from: std.topCenter,
+      to: gym.bottomCenter,
+      kind: "inherit",
+      active:
+        highlightedClass === "StandardMember" ||
+        (highlightedMethod !== null &&
+          METHOD_INFO[highlightedMethod].overriddenIn.includes("StandardMember")),
+    });
+    newLines.push({
+      from: pt.topCenter,
+      to: gym.bottomCenter,
+      kind: "inherit",
+      active:
+        highlightedClass === "PTMember" ||
+        (highlightedMethod !== null &&
+          METHOD_INFO[highlightedMethod].overriddenIn.includes("PTMember")),
+    });
+
+    // instance-of 화살표: 각 카드 → 부모 클래스 박스
+    members.forEach((m, idx) => {
+      const cardEl = cardRefs.current[idx];
+      const cardRect = getRect(cardEl);
+      if (!cardRect) return;
+      const isPT = m instanceof PTMember;
+      const parent = isPT ? pt : std;
+      newLines.push({
+        from: cardRect.topCenter,
+        to: parent.bottomCenter,
+        kind: "instance",
+        active:
+          hoveredCardIdx === idx ||
+          (hoveredLogId !== null &&
+            logs.find((l) => l.id === hoveredLogId)?.memberName === m.name),
+      });
+    });
+
+    setLines(newLines);
+    setSvgSize({
+      width: container.scrollWidth,
+      height: container.scrollHeight,
+    });
+  };
+
+  // 레이아웃 측정은 useLayoutEffect로
+  useLayoutEffect(() => {
+    recomputeLines();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members, highlightedClass, highlightedMethod, hoveredCardIdx, hoveredLogId, logs]);
+
+  // 윈도우 리사이즈, ResizeObserver
+  useEffect(() => {
+    const handler = () => recomputeLines();
+    window.addEventListener("resize", handler);
+    window.addEventListener("scroll", handler, true);
+    const ro = new ResizeObserver(handler);
+    if (diagramRef.current) ro.observe(diagramRef.current);
+    return () => {
+      window.removeEventListener("resize", handler);
+      window.removeEventListener("scroll", handler, true);
+      ro.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const callMethod = (
     member: GymMember,
@@ -73,7 +200,7 @@ export default function Home() {
     ]);
   };
 
-  const runFullDemo = async () => {     // ← 이거 빠진 거
+  const runFullDemo = async () => {
     for (const m of members) {
       callMethod(m, "workOut");
       await new Promise((r) => setTimeout(r, 400));
@@ -108,7 +235,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-200 p-6 font-mono">
-      <header className="max-w-6xl mx-auto mb-8">
+      <header className="max-w-6xl mx-auto mb-4">
         <h1 className="text-4xl font-bold text-center mb-2 bg-gradient-to-r from-indigo-400 via-sky-400 to-emerald-400 bg-clip-text text-transparent">
           Gym Member Management System
         </h1>
@@ -132,213 +259,327 @@ export default function Home() {
       </header>
 
       <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-3">
-          <ClassBox
-            tag="⟪ Abstract ⟫ ADT Class"
-            name="MemberADT"
-            color="indigo"
-            isHighlighted={false}
+        {/* 왼쪽: 다이어그램 + SVG 오버레이 */}
+        <div ref={diagramRef} className="lg:col-span-2 relative space-y-6">
+          {/* SVG 오버레이 */}
+          <svg
+            className="absolute inset-0 pointer-events-none z-0"
+            width={svgSize.width}
+            height={svgSize.height}
+            style={{ overflow: "visible" }}
           >
-            <div className="text-slate-400 italic">+ name · type · days · todayPart</div>
-            <div className="space-y-0.5">
-              {(["workOut", "checkStatus", "renew"] as const).map((method) => (
-                <button
-                  key={method}
-                  onMouseEnter={() => setHighlightedMethod(method)}
-                  onMouseLeave={() => setHighlightedMethod(null)}
-                  className={`block w-full text-left italic transition px-2 py-0.5 rounded ${
-                    highlightedMethod === method
-                      ? "bg-indigo-500/20 text-indigo-300"
-                      : "text-slate-400 hover:bg-slate-800"
-                  }`}
-                >
-                  + {method}()
-                </button>
-              ))}
-            </div>
-            {highlightedMethod && (
-              <div className="mt-2 pt-2 border-t border-slate-700 text-xs text-indigo-300">
-                {METHOD_INFO[highlightedMethod].description}
-                <br />
-                <span className="text-slate-500">
-                  Overridden in:{" "}
-                  {METHOD_INFO[highlightedMethod].overriddenIn.length === 0
-                    ? "(없음 - 그대로 상속)"
-                    : METHOD_INFO[highlightedMethod].overriddenIn.join(", ")}
-                </span>
-              </div>
-            )}
-          </ClassBox>
+            <defs>
+              {/* 빈 삼각형 머리 (상속용) */}
+              <marker
+                id="inheritArrow"
+                viewBox="0 0 12 12"
+                refX="12"
+                refY="6"
+                markerWidth="14"
+                markerHeight="14"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 12 6 L 0 12 z" fill="none" stroke="#64748b" strokeWidth="1.5" />
+              </marker>
+              <marker
+                id="inheritArrowActive"
+                viewBox="0 0 12 12"
+                refX="12"
+                refY="6"
+                markerWidth="14"
+                markerHeight="14"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 12 6 L 0 12 z" fill="none" stroke="#a78bfa" strokeWidth="2" />
+              </marker>
+              {/* 작은 화살촉 (instance-of용) */}
+              <marker
+                id="instanceArrow"
+                viewBox="0 0 10 10"
+                refX="10"
+                refY="5"
+                markerWidth="8"
+                markerHeight="8"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569" />
+              </marker>
+              <marker
+                id="instanceArrowActive"
+                viewBox="0 0 10 10"
+                refX="10"
+                refY="5"
+                markerWidth="8"
+                markerHeight="8"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#f59e0b" />
+              </marker>
+            </defs>
 
-          <ArrowConnector label="extends" />
+            {lines.map((line, i) => {
+              if (line.kind === "inherit") {
+                // 상속: 자식 → 부모 (위로 가는 선, 부모 쪽에 빈 삼각형)
+                const stroke = line.active ? "#a78bfa" : "#64748b";
+                const sw = line.active ? 2 : 1.2;
+                const marker = line.active ? "url(#inheritArrowActive)" : "url(#inheritArrow)";
+                return (
+                  <line
+                    key={i}
+                    x1={line.from.x}
+                    y1={line.from.y}
+                    x2={line.to.x}
+                    y2={line.to.y}
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    markerEnd={marker}
+                    className="transition-all duration-200"
+                  />
+                );
+              } else {
+                // instance-of: 카드 → 부모 (점선)
+                const stroke = line.active ? "#f59e0b" : "#475569";
+                const sw = line.active ? 2 : 1;
+                const marker = line.active
+                  ? "url(#instanceArrowActive)"
+                  : "url(#instanceArrow)";
+                return (
+                  <line
+                    key={i}
+                    x1={line.from.x}
+                    y1={line.from.y}
+                    x2={line.to.x}
+                    y2={line.to.y}
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    strokeDasharray="4 4"
+                    markerEnd={marker}
+                    className="transition-all duration-200"
+                  />
+                );
+              }
+            })}
+          </svg>
 
-          <ClassBox
-            tag="Base Class · Implementation"
-            name="GymMember"
-            color="sky"
-            isHighlighted={highlightedClass === "GymMember"}
-          >
-            <div className="text-slate-400">
-              - _name · _days · _type · _todayPart
-            </div>
-            <div className="space-y-0.5">
-              {(["workOut", "checkStatus", "renew"] as const).map((method) => (
-                <div
-                  key={method}
-                  className={`px-2 py-0.5 rounded transition ${
-                    highlightedMethod === method
-                      ? "bg-sky-500/20 text-sky-300"
-                      : "text-slate-300"
-                  }`}
-                >
-                  + {method}(){method === "renew" && " = 30"}
+          {/* 박스/카드 콘텐츠 (z-10으로 SVG 위에) */}
+          <div className="relative z-10 space-y-12">
+            <div ref={adtRef}>
+              <ClassBox
+                tag="⟪ Abstract ⟫ ADT Class"
+                name="MemberADT"
+                color="indigo"
+                isHighlighted={false}
+              >
+                <div className="text-slate-400 italic">+ name · type · days · todayPart</div>
+                <div className="space-y-0.5">
+                  {(["workOut", "checkStatus", "renew"] as const).map((method) => (
+                    <button
+                      key={method}
+                      onMouseEnter={() => setHighlightedMethod(method)}
+                      onMouseLeave={() => setHighlightedMethod(null)}
+                      className={`block w-full text-left italic transition px-2 py-0.5 rounded ${
+                        highlightedMethod === method
+                          ? "bg-indigo-500/20 text-indigo-300"
+                          : "text-slate-400 hover:bg-slate-800"
+                      }`}
+                    >
+                      + {method}()
+                    </button>
+                  ))}
                 </div>
-              ))}
+                {highlightedMethod && (
+                  <div className="mt-2 pt-2 border-t border-slate-700 text-xs text-indigo-300">
+                    {METHOD_INFO[highlightedMethod].description}
+                    <br />
+                    <span className="text-slate-500">
+                      Overridden in:{" "}
+                      {METHOD_INFO[highlightedMethod].overriddenIn.length === 0
+                        ? "(없음 - 그대로 상속)"
+                        : METHOD_INFO[highlightedMethod].overriddenIn.join(", ")}
+                    </span>
+                  </div>
+                )}
+              </ClassBox>
             </div>
-          </ClassBox>
 
-          <ArrowConnector label="extends" />
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <ClassBox
-              tag="Subclass"
-              name="StandardMember"
-              color="emerald"
-              isHighlighted={activeHighlightClasses.has("StandardMember")}
-              onHover={(hovering) =>
-                setHighlightedClass(hovering ? "StandardMember" : null)
-              }
-            >
-              <div
-                className={`px-2 py-0.5 rounded ${
-                  highlightedMethod === "workOut"
-                    ? "bg-emerald-500/30 text-emerald-200"
-                    : "text-slate-300"
-                }`}
+            <div ref={gymMemberRef}>
+              <ClassBox
+                tag="Base Class · Implementation"
+                name="GymMember"
+                color="sky"
+                isHighlighted={highlightedClass === "GymMember"}
               >
-                + workOut(){" "}
-                <span className="text-emerald-400 text-xs">⟪override⟫</span>
-              </div>
-            </ClassBox>
-            <ClassBox
-              tag="Subclass"
-              name="PTMember"
-              color="orange"
-              isHighlighted={activeHighlightClasses.has("PTMember")}
-              onHover={(hovering) =>
-                setHighlightedClass(hovering ? "PTMember" : null)
-              }
-            >
-              <div className="text-slate-400">- _trainer</div>
-              <div
-                className={`px-2 py-0.5 rounded ${
-                  highlightedMethod === "workOut"
-                    ? "bg-orange-500/30 text-orange-200"
-                    : "text-slate-300"
-                }`}
-              >
-                + workOut(){" "}
-                <span className="text-orange-400 text-xs">⟪override⟫</span>
-              </div>
-              <div
-                className={`px-2 py-0.5 rounded ${
-                  highlightedMethod === "checkStatus"
-                    ? "bg-orange-500/30 text-orange-200"
-                    : "text-slate-300"
-                }`}
-              >
-                + checkStatus(){" "}
-                <span className="text-orange-400 text-xs">⟪override⟫</span>
-              </div>
-            </ClassBox>
-          </div>
+                <div className="text-slate-400">
+                  - _name · _days · _type · _todayPart
+                </div>
+                <div className="space-y-0.5">
+                  {(["workOut", "checkStatus", "renew"] as const).map((method) => (
+                    <div
+                      key={method}
+                      className={`px-2 py-0.5 rounded transition ${
+                        highlightedMethod === method
+                          ? "bg-sky-500/20 text-sky-300"
+                          : "text-slate-300"
+                      }`}
+                    >
+                      + {method}(){method === "renew" && " = 30"}
+                    </div>
+                  ))}
+                </div>
+              </ClassBox>
+            </div>
 
-          <ArrowConnector label="instance-of" />
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-            {members.map((m, idx) => {
-              const isPT = m instanceof PTMember;
-              const className = isPT ? "PTMember" : "StandardMember";
-              const isHighlightedFromLog = highlightedCardIdxFromLog === idx;
-              const isClassHighlighted = activeHighlightClasses.has(className);
-
-              const borderColor = isPT ? "border-orange-500" : "border-emerald-500";
-              const bgColor = isPT ? "bg-orange-950/30" : "bg-emerald-950/30";
-              const glow =
-                isHighlightedFromLog || isClassHighlighted
-                  ? isPT
-                    ? "shadow-lg shadow-orange-500/50 scale-[1.02]"
-                    : "shadow-lg shadow-emerald-500/50 scale-[1.02]"
-                  : "";
-              const btnColor = isPT
-                ? "bg-orange-600 hover:bg-orange-500"
-                : "bg-emerald-600 hover:bg-emerald-500";
-
-              return (
-                <div
-                  key={idx}
-                  onMouseEnter={() => {
-                    setHoveredCardIdx(idx);
-                    setHighlightedClass(className);
-                  }}
-                  onMouseLeave={() => {
-                    setHoveredCardIdx(null);
-                    setHighlightedClass(null);
-                  }}
-                  className={`border-2 ${borderColor} ${bgColor} ${glow} rounded-lg p-3 transition-all duration-200`}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div ref={standardRef} className="h-full">
+                <ClassBox
+                  tag="Subclass"
+                  name="StandardMember"
+                  color="emerald"
+                  isHighlighted={activeHighlightClasses.has("StandardMember")}
+                  onHover={(hovering) =>
+                    setHighlightedClass(hovering ? "StandardMember" : null)
+                  }
                 >
-                  <div className="flex items-center gap-2 mb-2">
-                    <div className="text-3xl">{isPT ? "🔥" : "🏃"}</div>
-                    <div>
-                      <div className="font-bold text-slate-100">{m.name}</div>
-                      <div
-                        className={`text-xs ${
-                          isPT ? "text-orange-400" : "text-emerald-400"
-                        }`}
-                      >
-                        {className}
+                  <div
+                    className={`px-2 py-0.5 rounded ${
+                      highlightedMethod === "workOut"
+                        ? "bg-emerald-500/30 text-emerald-200"
+                        : "text-slate-300"
+                    }`}
+                  >
+                    + workOut(){" "}
+                    <span className="text-emerald-400 text-xs">⟪override⟫</span>
+                  </div>
+                </ClassBox>
+              </div>
+              <div ref={ptRef} className="h-full">
+                <ClassBox
+                  tag="Subclass"
+                  name="PTMember"
+                  color="orange"
+                  isHighlighted={activeHighlightClasses.has("PTMember")}
+                  onHover={(hovering) =>
+                    setHighlightedClass(hovering ? "PTMember" : null)
+                  }
+                >
+                  <div className="text-slate-400">- _trainer</div>
+                  <div
+                    className={`px-2 py-0.5 rounded ${
+                      highlightedMethod === "workOut"
+                        ? "bg-orange-500/30 text-orange-200"
+                        : "text-slate-300"
+                    }`}
+                  >
+                    + workOut(){" "}
+                    <span className="text-orange-400 text-xs">⟪override⟫</span>
+                  </div>
+                  <div
+                    className={`px-2 py-0.5 rounded ${
+                      highlightedMethod === "checkStatus"
+                        ? "bg-orange-500/30 text-orange-200"
+                        : "text-slate-300"
+                    }`}
+                  >
+                    + checkStatus(){" "}
+                    <span className="text-orange-400 text-xs">⟪override⟫</span>
+                  </div>
+                </ClassBox>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 pt-10">
+              {members.map((m, idx) => {
+                const isPT = m instanceof PTMember;
+                const className = isPT ? "PTMember" : "StandardMember";
+                const isHighlightedFromLog = highlightedCardIdxFromLog === idx;
+                const isClassHighlighted = activeHighlightClasses.has(className);
+
+                const borderColor = isPT ? "border-orange-500" : "border-emerald-500";
+                const bgColor = isPT ? "bg-orange-950/30" : "bg-emerald-950/30";
+                const glow =
+                  isHighlightedFromLog || isClassHighlighted
+                    ? isPT
+                      ? "shadow-lg shadow-orange-500/50 scale-[1.02]"
+                      : "shadow-lg shadow-emerald-500/50 scale-[1.02]"
+                    : "";
+                const btnColor = isPT
+                  ? "bg-orange-600 hover:bg-orange-500"
+                  : "bg-emerald-600 hover:bg-emerald-500";
+
+                return (
+                  <div
+                    key={idx}
+                    ref={(el) => {
+                      cardRefs.current[idx] = el;
+                    }}
+                    onMouseEnter={() => {
+                      setHoveredCardIdx(idx);
+                      setHighlightedClass(className);
+                    }}
+                    onMouseLeave={() => {
+                      setHoveredCardIdx(null);
+                      setHighlightedClass(null);
+                    }}
+                    className={`border-2 ${borderColor} ${bgColor} ${glow} rounded-lg p-3 transition-all duration-200`}
+                  >
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="text-3xl">{isPT ? "🔥" : "🏃"}</div>
+                      <div>
+                        <div className="font-bold text-slate-100">{m.name}</div>
+                        <div
+                          className={`text-xs ${
+                            isPT ? "text-orange-400" : "text-emerald-400"
+                          }`}
+                        >
+                          {className}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div className="text-xs space-y-0.5 mb-2 text-slate-300">
-                    <div>
-                      part:{" "}
-                      <span className="text-slate-100 font-bold">
-                        {m.todayPart}
-                      </span>
-                    </div>
-                    <div>
-                      days:{" "}
-                      <span className="text-slate-100 font-bold text-base">
-                        {m.days}
-                      </span>
-                    </div>
-                    {isPT && (
+                    <div className="text-xs space-y-0.5 mb-2 text-slate-300">
                       <div>
-                        trainer:{" "}
-                        <span className="text-orange-300 font-bold">
-                          {(m as PTMember).trainer}
+                        part:{" "}
+                        <span className="text-slate-100 font-bold">
+                          {m.todayPart}
                         </span>
                       </div>
-                    )}
+                      <div>
+                        days:{" "}
+                        <span className="text-slate-100 font-bold text-base">
+                          {m.days}
+                        </span>
+                      </div>
+                      {isPT && (
+                        <div>
+                          trainer:{" "}
+                          <span className="text-orange-300 font-bold">
+                            {(m as PTMember).trainer}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(["workOut", "checkStatus", "renew"] as const).map((method) => (
+                        <button
+                          key={method}
+                          onClick={() => callMethod(m, method)}
+                          className={`text-[10px] text-white rounded py-1 ${btnColor} transition font-semibold`}
+                        >
+                          {method === "workOut"
+                            ? "workOut"
+                            : method === "checkStatus"
+                            ? "status"
+                            : "renew"}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="grid grid-cols-3 gap-1">
-                    {(["workOut", "checkStatus", "renew"] as const).map((method) => (
-                      <button
-                        key={method}
-                        onClick={() => callMethod(m, method)}
-                        className={`text-[10px] text-white rounded py-1 ${btnColor} transition font-semibold`}
-                      >
-                        {method === "workOut" ? "workOut" : method === "checkStatus" ? "status" : "renew"}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         </div>
 
+        {/* 오른쪽: 출력 로그 */}
         <aside className="lg:col-span-1">
           <div className="sticky top-4 border border-slate-700 rounded-lg bg-slate-900 p-4 max-h-[85vh] flex flex-col">
             <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-700">
@@ -441,7 +682,7 @@ function ClassBox(props: ClassBoxProps) {
     <div
       onMouseEnter={() => onHover?.(true)}
       onMouseLeave={() => onHover?.(false)}
-      className={`border-2 ${c.borderStyle} ${c.border} ${c.bg} rounded-lg p-4 transition-all duration-200 ${
+      className={`h-full border-2 ${c.borderStyle} ${c.border} ${c.bg} rounded-lg p-4 transition-all duration-200 ${
         isHighlighted ? `shadow-lg ${c.glow} scale-[1.01]` : ""
       }`}
     >
@@ -450,17 +691,6 @@ function ClassBox(props: ClassBoxProps) {
       </div>
       <div className="text-xl font-bold text-slate-100 mb-2">{name}</div>
       <div className="text-xs space-y-0.5">{children}</div>
-    </div>
-  );
-}
-
-function ArrowConnector({ label }: { label: string }) {
-  return (
-    <div className="flex justify-center items-center gap-2 py-1">
-      <div className="text-slate-600 text-xs">△</div>
-      <div className="text-slate-500 text-[10px] uppercase tracking-widest">
-        {label}
-      </div>
     </div>
   );
 }
