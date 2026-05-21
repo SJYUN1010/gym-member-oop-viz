@@ -1,10 +1,20 @@
 "use client";
 
-import { useState, useMemo, useRef, useEffect, useLayoutEffect, forwardRef } from "react";
+import {
+  useState,
+  useMemo,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+  forwardRef,
+} from "react";
 import { GymMember } from "@/lib/gymMember";
+import { StandardMember } from "@/lib/standardMember";
 import { PTMember } from "@/lib/ptMember";
 import { createMembers } from "@/lib/instances";
 import { useAnimatedNumber } from "@/lib/useAnimatedNumber";
+
+const MAX_MEMBERS = 8;
 
 type LogEntry = {
   id: number;
@@ -47,24 +57,37 @@ type Line = {
   active: boolean;
 };
 
+// 카드에 안정적인 id를 부여하기 위한 wrapper
+type MemberEntry = {
+  id: number;
+  member: GymMember;
+};
+
+let memberIdCounter = 0;
+function wrap(members: GymMember[]): MemberEntry[] {
+  return members.map((m) => ({ id: memberIdCounter++, member: m }));
+}
+
 export default function Home() {
-  const [members, setMembers] = useState<GymMember[]>(() => createMembers());
+  const [entries, setEntries] = useState<MemberEntry[]>(() => wrap(createMembers()));
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logIdRef = useRef(0);
   const [highlightedMethod, setHighlightedMethod] = useState<string | null>(null);
   const [highlightedClass, setHighlightedClass] = useState<string | null>(null);
-  const [hoveredCardIdx, setHoveredCardIdx] = useState<number | null>(null);
+  const [hoveredCardId, setHoveredCardId] = useState<number | null>(null);
   const [hoveredLogId, setHoveredLogId] = useState<number | null>(null);
-  const [pulsedCardIdx, setPulsedCardIdx] = useState<number | null>(null);
+  const [pulsedCardId, setPulsedCardId] = useState<number | null>(null);
+  const [newlyAddedId, setNewlyAddedId] = useState<number | null>(null);
   const [darkMode, setDarkMode] = useState(true);
   const [showHelp, setShowHelp] = useState(false);
+  const [showAddForm, setShowAddForm] = useState(false);
 
   const diagramRef = useRef<HTMLDivElement>(null);
   const adtRef = useRef<HTMLDivElement>(null);
   const gymMemberRef = useRef<HTMLDivElement>(null);
   const standardRef = useRef<HTMLDivElement>(null);
   const ptRef = useRef<HTMLDivElement>(null);
-  const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
   const [lines, setLines] = useState<Line[]>([]);
   const [svgSize, setSvgSize] = useState({ width: 0, height: 0 });
@@ -82,15 +105,6 @@ export default function Home() {
         bottomCenter: {
           x: r.left + r.width / 2 - cRect.left,
           y: r.bottom - cRect.top,
-        },
-        leftCenter: { x: r.left - cRect.left, y: r.top + r.height / 2 - cRect.top },
-        rightCenter: {
-          x: r.right - cRect.left,
-          y: r.top + r.height / 2 - cRect.top,
-        },
-        center: {
-          x: r.left + r.width / 2 - cRect.left,
-          y: r.top + r.height / 2 - cRect.top,
         },
         leftEdge: r.left - cRect.left,
         rightEdge: r.right - cRect.left,
@@ -133,14 +147,12 @@ export default function Home() {
           METHOD_INFO[highlightedMethod].overriddenIn.includes("PTMember")),
     });
 
-    // instance-of: 카드 → 부모 박스의 "가까운 쪽" 밑면으로
-    members.forEach((m, idx) => {
-      const cardEl = cardRefs.current[idx];
-      const cardRect = getRect(cardEl);
+    entries.forEach((entry) => {
+      const cardEl = cardRefs.current.get(entry.id);
+      const cardRect = getRect(cardEl ?? null);
       if (!cardRect) return;
-      const isPT = m instanceof PTMember;
+      const isPT = entry.member instanceof PTMember;
       const parent = isPT ? pt : std;
-      // 부모 박스 밑면에서 카드와 가까운 x 좌표 선택
       const targetX = Math.max(
         parent.leftEdge + 20,
         Math.min(cardRect.topCenter.x, parent.rightEdge - 20)
@@ -150,9 +162,9 @@ export default function Home() {
         to: { x: targetX, y: parent.bottomEdge },
         kind: "instance",
         active:
-          hoveredCardIdx === idx ||
+          hoveredCardId === entry.id ||
           (hoveredLogId !== null &&
-            logs.find((l) => l.id === hoveredLogId)?.memberName === m.name),
+            logs.find((l) => l.id === hoveredLogId)?.memberName === entry.member.name),
       });
     });
 
@@ -166,7 +178,7 @@ export default function Home() {
   useLayoutEffect(() => {
     recomputeLines();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members, highlightedClass, highlightedMethod, hoveredCardIdx, hoveredLogId, logs]);
+  }, [entries, highlightedClass, highlightedMethod, hoveredCardId, hoveredLogId, logs]);
 
   useEffect(() => {
     const handler = () => recomputeLines();
@@ -183,16 +195,16 @@ export default function Home() {
   }, []);
 
   const callMethod = (
-    member: GymMember,
-    methodName: "workOut" | "checkStatus" | "renew",
-    idx: number
+    entry: MemberEntry,
+    methodName: "workOut" | "checkStatus" | "renew"
   ) => {
+    const { member } = entry;
     let result: string[] = [];
     if (methodName === "workOut") result = [member.workOut()];
     else if (methodName === "checkStatus") result = member.checkStatus();
     else if (methodName === "renew") {
       result = [member.renew()];
-      setMembers((prev) => [...prev]);
+      setEntries((prev) => [...prev]);
     }
     const className = member instanceof PTMember ? "PTMember" : "StandardMember";
     const newId = logIdRef.current++;
@@ -207,27 +219,43 @@ export default function Home() {
       },
       ...prev,
     ]);
-    // 펄스 효과 트리거
-    setPulsedCardIdx(idx);
-    setTimeout(() => setPulsedCardIdx(null), 600);
+    setPulsedCardId(entry.id);
+    setTimeout(() => setPulsedCardId((p) => (p === entry.id ? null : p)), 600);
   };
 
   const runFullDemo = async () => {
-    for (let i = 0; i < members.length; i++) {
-      callMethod(members[i], "workOut", i);
+    for (const e of entries) {
+      callMethod(e, "workOut");
       await new Promise((r) => setTimeout(r, 450));
     }
   };
 
   const resetAll = () => {
-    setMembers(createMembers());
+    cardRefs.current.clear();
+    setEntries(wrap(createMembers()));
     setLogs([]);
     logIdRef.current = 0;
     setHighlightedMethod(null);
     setHighlightedClass(null);
-    setHoveredCardIdx(null);
+    setHoveredCardId(null);
     setHoveredLogId(null);
-    setPulsedCardIdx(null);
+    setPulsedCardId(null);
+    setNewlyAddedId(null);
+    setShowAddForm(false);
+  };
+
+  const addMember = (m: GymMember) => {
+    if (entries.length >= MAX_MEMBERS) return;
+    const newEntry = { id: memberIdCounter++, member: m };
+    setEntries((prev) => [...prev, newEntry]);
+    setNewlyAddedId(newEntry.id);
+    setTimeout(() => setNewlyAddedId((n) => (n === newEntry.id ? null : n)), 400);
+  };
+
+  const removeMember = (id: number) => {
+    cardRefs.current.delete(id);
+    setEntries((prev) => prev.filter((e) => e.id !== id));
+    if (hoveredCardId === id) setHoveredCardId(null);
   };
 
   const activeHighlightClasses = useMemo(() => {
@@ -239,27 +267,18 @@ export default function Home() {
     return s;
   }, [highlightedMethod, highlightedClass]);
 
-  const highlightedCardIdxFromLog = useMemo(() => {
+  const highlightedCardIdFromLog = useMemo(() => {
     if (hoveredLogId === null) return null;
     const log = logs.find((l) => l.id === hoveredLogId);
     if (!log) return null;
-    return members.findIndex((m) => m.name === log.memberName);
-  }, [hoveredLogId, logs, members]);
+    return entries.find((e) => e.member.name === log.memberName)?.id ?? null;
+  }, [hoveredLogId, logs, entries]);
 
-  // 테마 색상
   const t = darkMode
-    ? {
-        main: "bg-slate-950 text-slate-200",
-        sub: "text-slate-400",
-        cardBorderL: "border-slate-700",
-        cardBg: "bg-slate-900",
-      }
-    : {
-        main: "bg-slate-50 text-slate-800",
-        sub: "text-slate-500",
-        cardBorderL: "border-slate-300",
-        cardBg: "bg-white",
-      };
+    ? { main: "bg-slate-950 text-slate-200", sub: "text-slate-400" }
+    : { main: "bg-slate-50 text-slate-800", sub: "text-slate-500" };
+
+  const canAdd = entries.length < MAX_MEMBERS;
 
   return (
     <main className={`min-h-screen ${t.main} p-6 font-mono transition-colors duration-300`}>
@@ -324,18 +343,33 @@ export default function Home() {
               <span className={t.sub}>같은 메서드, 다른 결과 = 다형성.</span>
             </div>
             <div>
-              <span className="text-sky-400">·</span> <b>Run Full Demo</b> →
-              5명의 workOut을 차례로 호출. 다형성이 한 화면에 펼쳐집니다.
+              <span className="text-sky-400">·</span> <b>+ Add Member</b> →
+              새로운 인스턴스를 직접 생성. 클래스 → 인스턴스로의 흐름을 체험해보세요.
+            </div>
+            <div>
+              <span className="text-pink-400">·</span> <b>Run Full Demo</b> →
+              모든 회원의 workOut을 차례로 호출. 다형성이 한 화면에 펼쳐집니다.
             </div>
           </div>
         )}
 
-        <div className="flex justify-center gap-2 mt-4">
+        <div className="flex justify-center gap-2 mt-4 flex-wrap">
           <button
             onClick={runFullDemo}
             className="px-4 py-2 rounded-md bg-gradient-to-r from-indigo-500 to-sky-500 hover:from-indigo-400 hover:to-sky-400 text-white text-sm font-bold transition shadow-lg shadow-indigo-500/30"
           >
             ▶ Run Full Demo
+          </button>
+          <button
+            onClick={() => setShowAddForm((s) => !s)}
+            disabled={!canAdd && !showAddForm}
+            className={`px-4 py-2 rounded-md text-sm font-bold transition ${
+              canAdd || showAddForm
+                ? "bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-white shadow-lg shadow-emerald-500/30"
+                : "bg-slate-700 text-slate-500 cursor-not-allowed"
+            }`}
+          >
+            + Add Member {!canAdd && "(최대 도달)"}
           </button>
           <button
             onClick={resetAll}
@@ -348,6 +382,20 @@ export default function Home() {
             ↻ Reset
           </button>
         </div>
+
+        {showAddForm && (
+          <AddMemberForm
+            darkMode={darkMode}
+            canAdd={canAdd}
+            currentCount={entries.length}
+            maxCount={MAX_MEMBERS}
+            onAdd={(m) => {
+              addMember(m);
+              setShowAddForm(false);
+            }}
+            onCancel={() => setShowAddForm(false)}
+          />
+        )}
       </header>
 
       <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -486,7 +534,7 @@ export default function Home() {
                   <div
                     className={`mt-2 pt-2 border-t ${
                       darkMode ? "border-slate-700" : "border-slate-300"
-                    } text-xs text-indigo-${darkMode ? "300" : "600"}`}
+                    } text-xs ${darkMode ? "text-indigo-300" : "text-indigo-600"}`}
                   >
                     {METHOD_INFO[highlightedMethod].description}
                     <br />
@@ -600,30 +648,33 @@ export default function Home() {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 pt-4">
-              {members.map((m, idx) => (
+              {entries.map((entry) => (
                 <MemberCard
-                  key={idx}
+                  key={entry.id}
                   ref={(el: HTMLDivElement | null) => {
-                    cardRefs.current[idx] = el;
+                    if (el) cardRefs.current.set(entry.id, el);
+                    else cardRefs.current.delete(entry.id);
                   }}
-                  member={m}
-                  isHighlightedFromLog={highlightedCardIdxFromLog === idx}
+                  member={entry.member}
+                  isHighlightedFromLog={highlightedCardIdFromLog === entry.id}
                   isClassHighlighted={activeHighlightClasses.has(
-                    m instanceof PTMember ? "PTMember" : "StandardMember"
+                    entry.member instanceof PTMember ? "PTMember" : "StandardMember"
                   )}
-                  isPulsed={pulsedCardIdx === idx}
+                  isPulsed={pulsedCardId === entry.id}
+                  isNewlyAdded={newlyAddedId === entry.id}
                   darkMode={darkMode}
                   onHover={(hovering) => {
-                    setHoveredCardIdx(hovering ? idx : null);
+                    setHoveredCardId(hovering ? entry.id : null);
                     setHighlightedClass(
                       hovering
-                        ? m instanceof PTMember
+                        ? entry.member instanceof PTMember
                           ? "PTMember"
                           : "StandardMember"
                         : null
                     );
                   }}
-                  onCall={(method) => callMethod(m, method, idx)}
+                  onCall={(method) => callMethod(entry, method)}
+                  onRemove={() => removeMember(entry.id)}
                 />
               ))}
             </div>
@@ -671,9 +722,7 @@ export default function Home() {
                   }`}
                 >
                   <div className={`font-semibold ${darkMode ? "text-slate-200" : "text-slate-800"}`}>
-                    <span
-                      className={log.isPT ? "text-orange-500" : "text-emerald-600"}
-                    >
+                    <span className={log.isPT ? "text-orange-500" : "text-emerald-600"}>
                       {log.className}
                     </span>
                     <span className={t.sub}>·</span> {log.memberName}.{log.methodName}()
@@ -706,7 +755,177 @@ export default function Home() {
   );
 }
 
-/* ─── 보조 컴포넌트 ─── */
+/* ─── 추가 폼 ─── */
+
+type AddMemberFormProps = {
+  darkMode: boolean;
+  canAdd: boolean;
+  currentCount: number;
+  maxCount: number;
+  onAdd: (m: GymMember) => void;
+  onCancel: () => void;
+};
+
+function AddMemberForm(props: AddMemberFormProps) {
+  const { darkMode, canAdd, currentCount, maxCount, onAdd, onCancel } = props;
+  const [name, setName] = useState("");
+  const [days, setDays] = useState("30");
+  const [part, setPart] = useState("전신");
+  const [type, setType] = useState<"standard" | "pt">("standard");
+  const [trainer, setTrainer] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = () => {
+    setError(null);
+    if (!canAdd) {
+      setError(`최대 ${maxCount}명까지만 가능합니다`);
+      return;
+    }
+    if (!name.trim()) {
+      setError("이름을 입력하세요");
+      return;
+    }
+    const d = parseInt(days, 10);
+    if (isNaN(d) || d <= 0) {
+      setError("일수는 1 이상의 숫자여야 합니다");
+      return;
+    }
+    if (!part.trim()) {
+      setError("운동 부위를 입력하세요");
+      return;
+    }
+    if (type === "pt" && !trainer.trim()) {
+      setError("PT 회원은 트레이너 이름이 필요합니다");
+      return;
+    }
+    const newMember: GymMember =
+      type === "pt"
+        ? new PTMember(name.trim(), d, trainer.trim(), part.trim())
+        : new StandardMember(name.trim(), d, part.trim());
+    onAdd(newMember);
+  };
+
+  const inputClass = darkMode
+    ? "bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500"
+    : "bg-white border-slate-300 text-slate-800 placeholder-slate-400";
+
+  return (
+    <div
+      className={`mt-4 p-4 rounded-lg border slide-in-down max-w-3xl mx-auto ${
+        darkMode
+          ? "border-emerald-700 bg-emerald-950/30"
+          : "border-emerald-300 bg-emerald-50"
+      }`}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <div className="font-bold text-base">
+          <span className="text-emerald-400">+</span> Add Member
+        </div>
+        <div className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+          {currentCount} / {maxCount}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        <label className="block">
+          <span className={darkMode ? "text-slate-400" : "text-slate-600"}>이름</span>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="홍길동"
+            className={`mt-1 w-full px-2 py-1.5 border rounded text-sm ${inputClass}`}
+          />
+        </label>
+        <label className="block">
+          <span className={darkMode ? "text-slate-400" : "text-slate-600"}>일수</span>
+          <input
+            type="number"
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            placeholder="30"
+            className={`mt-1 w-full px-2 py-1.5 border rounded text-sm ${inputClass}`}
+          />
+        </label>
+        <label className="block">
+          <span className={darkMode ? "text-slate-400" : "text-slate-600"}>운동 부위</span>
+          <input
+            type="text"
+            value={part}
+            onChange={(e) => setPart(e.target.value)}
+            placeholder="전신"
+            className={`mt-1 w-full px-2 py-1.5 border rounded text-sm ${inputClass}`}
+          />
+        </label>
+        <div className="block">
+          <span className={darkMode ? "text-slate-400" : "text-slate-600"}>유형</span>
+          <div className="mt-1 flex gap-3 text-sm">
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="radio"
+                name="memberType"
+                checked={type === "standard"}
+                onChange={() => setType("standard")}
+              />
+              <span className={darkMode ? "text-emerald-300" : "text-emerald-700"}>
+                Standard
+              </span>
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="radio"
+                name="memberType"
+                checked={type === "pt"}
+                onChange={() => setType("pt")}
+              />
+              <span className={darkMode ? "text-orange-300" : "text-orange-700"}>PT</span>
+            </label>
+          </div>
+        </div>
+
+        {type === "pt" && (
+          <label className="block sm:col-span-2 slide-in-down">
+            <span className={darkMode ? "text-slate-400" : "text-slate-600"}>
+              트레이너
+            </span>
+            <input
+              type="text"
+              value={trainer}
+              onChange={(e) => setTrainer(e.target.value)}
+              placeholder="아놀드"
+              className={`mt-1 w-full px-2 py-1.5 border rounded text-sm ${inputClass}`}
+            />
+          </label>
+        )}
+      </div>
+
+      {error && (
+        <div className="mt-3 text-xs text-red-400 font-semibold">⚠ {error}</div>
+      )}
+
+      <div className="mt-4 flex gap-2 justify-end">
+        <button
+          onClick={onCancel}
+          className={`px-3 py-1.5 text-xs rounded border ${
+            darkMode
+              ? "border-slate-700 hover:border-slate-500 hover:bg-slate-800"
+              : "border-slate-300 hover:border-slate-500 hover:bg-white"
+          }`}
+        >
+          취소
+        </button>
+        <button
+          onClick={handleSubmit}
+          className="px-3 py-1.5 text-xs rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
+        >
+          추가
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─── 클래스 박스 ─── */
 
 type ClassBoxProps = {
   tag: string;
@@ -770,17 +989,18 @@ function ClassBox(props: ClassBoxProps) {
   );
 }
 
-/* MemberCard — forwardRef로 카드 ref를 부모에서 잡을 수 있게 */
-
+/* ─── 멤버 카드 ─── */
 
 type MemberCardProps = {
   member: GymMember;
   isHighlightedFromLog: boolean;
   isClassHighlighted: boolean;
   isPulsed: boolean;
+  isNewlyAdded: boolean;
   darkMode: boolean;
   onHover: (hovering: boolean) => void;
   onCall: (method: "workOut" | "checkStatus" | "renew") => void;
+  onRemove: () => void;
 };
 
 const MemberCard = forwardRef<HTMLDivElement, MemberCardProps>(function MemberCard(
@@ -792,9 +1012,11 @@ const MemberCard = forwardRef<HTMLDivElement, MemberCardProps>(function MemberCa
     isHighlightedFromLog,
     isClassHighlighted,
     isPulsed,
+    isNewlyAdded,
     darkMode,
     onHover,
     onCall,
+    onRemove,
   } = props;
   const isPT = member instanceof PTMember;
   const className = isPT ? "PTMember" : "StandardMember";
@@ -818,11 +1040,8 @@ const MemberCard = forwardRef<HTMLDivElement, MemberCardProps>(function MemberCa
     ? "bg-orange-600 hover:bg-orange-500"
     : "bg-emerald-600 hover:bg-emerald-500";
 
-  // 펄스용 색상
   const pulseStyle: React.CSSProperties = isPulsed
-    ? {
-        color: isPT ? "rgba(251,146,60,0.8)" : "rgba(52,211,153,0.8)",
-      }
+    ? { color: isPT ? "rgba(251,146,60,0.8)" : "rgba(52,211,153,0.8)" }
     : {};
 
   return (
@@ -831,11 +1050,22 @@ const MemberCard = forwardRef<HTMLDivElement, MemberCardProps>(function MemberCa
       onMouseEnter={() => onHover(true)}
       onMouseLeave={() => onHover(false)}
       style={pulseStyle}
-      className={`border-2 ${borderColor} ${bgColor} ${glow} ${
+      className={`relative border-2 ${borderColor} ${bgColor} ${glow} ${
         isPulsed ? "pulse-glow" : ""
-      } rounded-lg p-3 transition-all duration-200`}
+      } ${isNewlyAdded ? "fade-in-scale" : ""} rounded-lg p-3 transition-all duration-200`}
     >
-      <div className="flex items-center gap-2 mb-2">
+      <button
+        onClick={onRemove}
+        title="삭제"
+        className={`absolute top-1.5 right-1.5 w-5 h-5 flex items-center justify-center rounded-full text-xs transition ${
+          darkMode
+            ? "bg-slate-800 text-slate-500 hover:bg-red-500 hover:text-white"
+            : "bg-white text-slate-400 hover:bg-red-500 hover:text-white"
+        }`}
+      >
+        ×
+      </button>
+      <div className="flex items-center gap-2 mb-2 pr-5">
         <div className="text-3xl">{isPT ? "🔥" : "🏃"}</div>
         <div>
           <div className={`font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>

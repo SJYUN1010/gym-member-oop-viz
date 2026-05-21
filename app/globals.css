@@ -41,3 +41,11 @@ body {
 .slide-in-down {
   animation: slideInDown 0.25s ease-out;
 }
+
+@keyframes fadeInScale {
+  from { transform: scale(0.9); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+.fade-in-scale {
+  animation: fadeInScale 0.3s ease-out;
+}
